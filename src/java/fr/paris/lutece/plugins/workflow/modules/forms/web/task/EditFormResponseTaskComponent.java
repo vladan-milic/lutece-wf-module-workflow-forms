@@ -35,17 +35,25 @@ package fr.paris.lutece.plugins.workflow.modules.forms.web.task;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 
+import fr.paris.lutece.plugins.forms.business.Control;
+import fr.paris.lutece.plugins.forms.business.ControlHome;
+import fr.paris.lutece.plugins.forms.business.ControlType;
+import fr.paris.lutece.plugins.forms.business.FormDisplay;
+import fr.paris.lutece.plugins.forms.business.FormDisplayHome;
 import fr.paris.lutece.plugins.forms.business.FormQuestionResponse;
 import fr.paris.lutece.plugins.forms.business.FormResponse;
 import fr.paris.lutece.plugins.forms.business.FormResponseStep;
 import fr.paris.lutece.plugins.forms.business.Question;
+import fr.paris.lutece.plugins.forms.business.QuestionHome;
 import fr.paris.lutece.plugins.forms.business.Step;
 import fr.paris.lutece.plugins.forms.business.StepHome;
 import fr.paris.lutece.plugins.forms.business.TransitionHome;
@@ -54,6 +62,7 @@ import fr.paris.lutece.plugins.forms.util.FormsConstants;
 import fr.paris.lutece.plugins.forms.web.entrytype.DisplayType;
 import fr.paris.lutece.plugins.forms.web.entrytype.IEntryDataService;
 import fr.paris.lutece.plugins.genericattributes.business.GenericAttributeError;
+import fr.paris.lutece.plugins.genericattributes.business.Response;
 import fr.paris.lutece.plugins.workflow.modules.forms.business.EditFormResponseTaskHistory;
 import fr.paris.lutece.plugins.workflow.modules.forms.service.task.IEditFormResponseTaskHistoryService;
 import fr.paris.lutece.plugins.workflow.modules.forms.service.task.IEditFormResponseTaskService;
@@ -63,8 +72,6 @@ import fr.paris.lutece.portal.service.message.AdminMessage;
 import fr.paris.lutece.portal.service.message.AdminMessageService;
 import fr.paris.lutece.portal.service.template.AppTemplateService;
 import fr.paris.lutece.util.html.HtmlTemplate;
-import java.util.HashSet;
-import java.util.Set;
 
 /**
  * This class represents a component for the task {@link fr.paris.lutece.plugins.workflow.modules.forms.service.task.EditFormResponseTask EditFormResponseTask}
@@ -111,7 +118,7 @@ public class EditFormResponseTaskComponent extends AbstractFormResponseTaskCompo
 
         FormResponse formResponse = _formsTaskService.findFormResponseFrom( nIdResource, strResourceType );
         List<Question> listQuestion = _editFormResponseTaskService.findQuestionsToEdit( formResponse );
-        GenericAttributeError error = validateQuestions( listQuestion, request );
+        GenericAttributeError error = validateQuestions( listQuestion, request, formResponse.getFormId( ) );
 
         if ( error != null )
         {
@@ -128,17 +135,25 @@ public class EditFormResponseTaskComponent extends AbstractFormResponseTaskCompo
      *            the questions to validate
      * @param request
      *            the request
+     * @param formId 
      * @return a {@code GenericAttributeError} if the validation fails, {@code null} otherwise
      */
-    private GenericAttributeError validateQuestions( List<Question> listQuestion, HttpServletRequest request )
+    private GenericAttributeError validateQuestions( List<Question> listQuestion, HttpServletRequest request, int formId )
     {
         GenericAttributeError error = null;
+
+        List<FormQuestionResponse> listFormQuestionResponse = new ArrayList<>( );
 
         for ( Question question : listQuestion )
         {
             IEntryDataService entryDataService = EntryServiceManager.getInstance( ).getEntryDataService( question.getEntry( ).getEntryType( ) );
             FormQuestionResponse formQuestionResponse = entryDataService.createResponseFromRequest( question, request, true );
-            if ( formQuestionResponse.hasError( ) )
+            listFormQuestionResponse.add( formQuestionResponse );
+        }
+
+        for ( FormQuestionResponse formQuestionResponse : listFormQuestionResponse )
+        {
+            if ( !isResponseValid( listFormQuestionResponse, formQuestionResponse, formId ) )
             {
                 error = formQuestionResponse.getError( );
                 break;
@@ -146,6 +161,99 @@ public class EditFormResponseTaskComponent extends AbstractFormResponseTaskCompo
         }
 
         return error;
+    }
+    
+    /**
+     * Validate question.
+     *
+     * @param question
+     *            the question
+     * @param formId
+     * @return true, if successful
+     */
+    private boolean isResponseValid( List<FormQuestionResponse> listFormQuestionResponse, FormQuestionResponse formQuestionResponse, int formId )
+    {
+        if ( !formQuestionResponse.hasError( ) || ( formQuestionResponse.hasError( ) && !formQuestionResponse.getError( ).isMandatoryError( ) ) )
+        {
+            return true;
+        }
+
+        Control controlConditionnalDisplay = getControlConditionnalDisplay( formQuestionResponse, formId );
+
+        // No Conditional validation
+        if ( controlConditionnalDisplay == null )
+        {
+            return true;
+        } else
+        {
+            for ( int questionId : controlConditionnalDisplay.getListIdQuestion( ) )
+            {
+                Question questionConditional = QuestionHome.findByPrimaryKey( questionId );
+                List<Response> listResponses = findResponses( listFormQuestionResponse, questionConditional );
+                for ( Response response : listResponses )
+                {
+                    String conditionalExpectedValue = controlConditionnalDisplay.getValue( );
+                    if ( conditionalExpectedValue.equals( response.getToStringValueResponse( ) ) || conditionalExpectedValue.equals( String.valueOf( response.getField( ).getIdField( ) ) ) )
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Gets the control conditionnal display.
+     *
+     * @param formQuestionResponse
+     *            the form question response
+     * @param formId
+     *            the form id
+     * @return the control conditionnal display
+     */
+    private Control getControlConditionnalDisplay( FormQuestionResponse formQuestionResponse, int formId )
+    {
+        Question question = formQuestionResponse.getQuestion( );
+        FormDisplay formDisplay = FormDisplayHome.getFormDisplayByFormStepAndComposite( formId, formQuestionResponse.getIdStep( ), question.getId( ) );
+
+        List<Control> listConditionalControl = ControlHome.getControlByControlTargetAndType( formDisplay.getId( ), ControlType.CONDITIONAL );
+        Control controlConditionnalDisplay = null;
+
+        if ( !listConditionalControl.isEmpty( ) )
+        {
+            controlConditionnalDisplay = listConditionalControl.get( 0 );
+        }
+        return controlConditionnalDisplay;
+    }
+    
+    /**
+     * Finds the responses associated to this instance among the specified list of form question responses
+     * 
+     * @param listFormQuestionResponse
+     *            the list of form question responses
+     * @return the responses
+     */
+    private List<Response> findResponses( List<FormQuestionResponse> listFormQuestionResponse, Question question )
+    {
+        List<Response> listResponse = new ArrayList<>( );
+
+        if ( listFormQuestionResponse != null )
+        {
+            for ( FormQuestionResponse formQuestionResponse : listFormQuestionResponse )
+            {
+                Question formQuestion = formQuestionResponse.getQuestion( );
+
+                if ( question.getId( ) == formQuestion.getId( ) && question.getIterationNumber( ) == formQuestion.getIterationNumber( ) )
+                {
+                    listResponse = formQuestionResponse.getEntryResponse( );
+                    break;
+                }
+            }
+        }
+
+        return listResponse;
     }
 
     /**
